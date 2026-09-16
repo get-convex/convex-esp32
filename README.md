@@ -138,10 +138,8 @@ See [`examples/ReactiveQuery`](examples/ReactiveQuery) for a complete sketch.
 | `convexConnected()` | Is the socket up. |
 | `convexSetAuth(token)` | Set/clear the `User` auth token. |
 | `convexOnState(cb, user)` | Connect/disconnect callback. |
-| `convexSubscribe(udfPath, args, cb, user)` | Reactive query, C callback; returns a queryId. |
-| `convexSubscribe(udfPath, args, lambda)` | Same, `std::function` (can capture). |
-| `convexSubscribe(udfPath, args)` | Cached, no callback — poll it from `loop()`. |
-| `convexQueryChanged(queryId)` / `convexQueryValue(queryId, out)` | Poll a cached subscription. |
+| `convexSubscribe(udfPath[, args][, cb[, user]][, cache])` | Reactive query; returns a queryId. Cached by default; optional push callback (lambda or C fn+user); `cache=false` for push-only. |
+| `convexQueryChanged(queryId)` / `convexQueryValue(queryId, out)` | Poll a subscription's latest value. |
 | `convexUnsubscribe(queryId)` | Drop a subscription. |
 | `convexMutation/Action(udfPath, args, cb[, user])` | Run it; C or `std::function` callback. |
 | `convexPause()` / `convexResume()` | Release / re-establish the socket (e.g. to free TLS heap). |
@@ -150,15 +148,13 @@ See [`examples/ReactiveQuery`](examples/ReactiveQuery) for a complete sketch.
 | `convexEnableTelemetry(on)` | Auto-emit `ClientConnect` on connect. |
 | `convexLastError()`, `convexSubCount()`, `convexBytesIn/Out()`, `convexHeapLowWater()` | Diagnostics. |
 
-### Reading a query: callback or poll
+### Reading a query: poll, callback, or both
 
-Two consumption models. **Callbacks** fire from the socket's background task —
-keep them short, copy what you keep, never block. **Or subscribe without a
-callback** and poll the cached value from your own `loop()` — nothing runs on
-the socket task, so there are no cross-thread footguns:
+A subscription is **cached by default**, so the simplest, thread-safe path is to
+poll it from your own `loop()` — nothing runs on the socket task:
 
 ```cpp
-int q = convexSubscribe("messages:list", args);   // cached; no callback
+int q = convexSubscribe("messages:list");          // cached; poll it
 // in loop():
 if (convexQueryChanged(q)) {
   JsonDocument doc;
@@ -166,8 +162,18 @@ if (convexQueryChanged(q)) {
 }
 ```
 
-Only a no-callback subscription keeps a cached copy (a callback one doesn't, to
-save memory).
+Add a **callback** to also get pushes (it fires from the socket task — keep it
+short, copy what you keep, never block):
+
+```cpp
+convexSubscribe("messages:list", args, [](bool ok, JsonVariantConst v) { ... });
+```
+
+Push-only and memory-tight? Pass `cache=false` to skip the cached copy:
+
+```cpp
+convexSubscribe("messages:list", args, onMsg, /*cache=*/false);
+```
 
 ## Memory & tuning
 

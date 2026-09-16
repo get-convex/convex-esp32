@@ -65,24 +65,22 @@ void convexOnState(ConvexStateCb cb, void *user);
  * single Convex args object (may be empty). Returns a queryId (>=0), or -1 if
  * the subscription table is full. Args are copied.
  *
- * Three forms:
- *   - callback (raw fn + user pointer): fires from the socket task on each change.
- *   - callback (std::function): same, but can capture. Small heap cost.
- *   - no callback: nothing fires; instead the latest value is cached and you
- *     read it from loop() with convexQueryChanged()/convexQueryValue(). This is
- *     the thread-safe, Arduino-friendly path -- and the only one that keeps a
- *     cached copy (a callback subscription does not, to save memory). */
+ * A subscription is CACHED by default: poll it from your own loop() with
+ * convexQueryChanged()/convexQueryValue() -- the thread-safe, Arduino-friendly
+ * path. Optionally pass a callback (std::function to capture, or a C fn + user
+ * pointer) to ALSO get pushed updates from the socket task. Pass cache=false
+ * for a push-only subscription that keeps no cached copy, to save memory. */
 int  convexSubscribe(const char *udfPath, const JsonDocument &args,
-                     ConvexQueryCb cb, void *user);
+                     ConvexQueryFn cb = ConvexQueryFn(), bool cache = true);
 int  convexSubscribe(const char *udfPath, const JsonDocument &args,
-                     ConvexQueryFn cb);
-int  convexSubscribe(const char *udfPath, const JsonDocument &args);
+                     ConvexQueryCb cb, void *user, bool cache = true);
+int  convexSubscribe(const char *udfPath);   // no args, cached, no callback
 void convexUnsubscribe(int queryId);
 
-/* Poll a cached (no-callback) subscription from your own loop(). Returns true
- * once per change; reading clears the flag. convexQueryValue parses the latest
- * cached value into `out` (returns false if there is none yet or it did not
- * fit CONVEX_RX_MAX). Both are no-ops for a callback subscription. */
+/* Poll a subscription's latest value from your own loop(). convexQueryChanged
+ * returns true once per change (reading clears the flag); convexQueryValue
+ * parses the latest cached value into `out` (false if none yet, it did not fit
+ * CONVEX_RX_MAX, or the subscription was created with cache=false). */
 bool convexQueryChanged(int queryId);
 bool convexQueryValue(int queryId, JsonDocument &out);
 

@@ -426,10 +426,13 @@ static int subscribeImpl(const char *udfPath, const JsonDocument &args,
   return qid;
 }
 
+int convexSubscribe(const char *udfPath, const JsonDocument &args, ConvexQueryFn cb, bool cache) {
+  return subscribeImpl(udfPath, args, std::move(cb), cache);
+}
 int convexSubscribe(const char *udfPath, const JsonDocument &args,
-                    ConvexQueryCb cb, void *user) {
+                    ConvexQueryCb cb, void *user, bool cache) {
   // Wrap the C-style callback; queryId is fixed once the slot is assigned.
-  int qid = subscribeImpl(udfPath, args, ConvexQueryFn(), false);
+  int qid = subscribeImpl(udfPath, args, ConvexQueryFn(), cache);
   if (qid < 0 || !cb) return qid;
   lock();
   for (int i = 0; i < MAX_SUBS; ++i)
@@ -440,11 +443,9 @@ int convexSubscribe(const char *udfPath, const JsonDocument &args,
   unlock();
   return qid;
 }
-int convexSubscribe(const char *udfPath, const JsonDocument &args, ConvexQueryFn cb) {
-  return subscribeImpl(udfPath, args, std::move(cb), false);
-}
-int convexSubscribe(const char *udfPath, const JsonDocument &args) {
-  return subscribeImpl(udfPath, args, ConvexQueryFn(), /*cached=*/true);
+int convexSubscribe(const char *udfPath) {
+  JsonDocument empty;
+  return subscribeImpl(udfPath, empty, ConvexQueryFn(), /*cache=*/true);
 }
 
 bool convexQueryChanged(int queryId) {
