@@ -30,6 +30,11 @@ void cxwsPause();    // disconnect and stop reconnecting (frees the TLS session)
 void cxwsResume();   // reconnect (resets the backoff)
 void cxwsPenalize(); // force the next reconnect to the maximum backoff (e.g. on a FatalError)
 
+// Register a callback invoked ~once a second from the socket task while
+// connected (used for time-based maintenance like proactive auth refresh).
+typedef void (*CxWsTickFn)();
+void cxwsOnTick(CxWsTickFn fn);
+
 // Optional: supply a CA bundle for TLS verification (DER x509 bundle, as the
 // ESP32 core embeds). If never called, the transport verifies against the core's
 // built-in bundle; pass nullptr to disable verification (development only).

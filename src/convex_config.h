@@ -48,6 +48,15 @@
 #define CONVEX_REQ_TIMEOUT_MS 30000
 #endif
 
+// Refresh an auth token from its provider this many seconds before the JWT's
+// exp, and the default assumed lifetime when the token carries no exp/iat.
+#ifndef CONVEX_AUTH_LEEWAY_S
+#define CONVEX_AUTH_LEEWAY_S 120
+#endif
+#ifndef CONVEX_AUTH_DEFAULT_LIFETIME_S
+#define CONVEX_AUTH_DEFAULT_LIFETIME_S 3300
+#endif
+
 // Reconnect backoff: exponential from BASE to MAX with jitter, so a persistent
 // failure (or a whole fleet failing at once) does not hammer the deployment.
 // The backoff resets to BASE only after a connection has stayed up for STABLE

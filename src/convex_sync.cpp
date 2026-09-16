@@ -67,11 +67,17 @@ static ConvexStateCb gStateCb = nullptr;
 static void *gStateUser = nullptr;
 static ConvexAuthCb gAuthCb = nullptr;
 static void *gAuthUser = nullptr;
+static ConvexTokenFn gTokenFn = nullptr;   // proactive token provider
+static void *gTokenUser = nullptr;
+static uint32_t gTokenRefreshAtMs = 0;     // millis() at which to re-fetch (0 = never)
+static void fetchAndSetToken(bool force);  // defined below with the auth helpers
 
 // Record a failure: sets both the machine-readable status and the human string.
 static ConvexStatus fail(ConvexStatus s, const char *msg) {
   gStatus = s; if (msg) snprintf(gErr, sizeof(gErr), "%s", msg); return s;
 }
+static char gErrData[192] = "";   // JSON of the last ConvexError's `errorData`
+const char *convexLastErrorData() { return gErrData; }
 void convexSetStatus_(ConvexStatus s) { gStatus = s; }   // internal, for convex_http.cpp
 ConvexStatus convexLastStatus() { return gStatus; }
 const char *convexStatusStr(ConvexStatus s) {
@@ -93,6 +99,12 @@ static uint32_t gConnectStartMs = 0;
 // Reassembly buffer for fragmented / oversized frames (PSRAM when present).
 static char *gRx = nullptr;
 static size_t gRxCap = 0, gRxLen = 0;
+
+// Reassembly buffer for a chunked Transition (server splits very large ones).
+static char *gChunk = nullptr;
+static size_t gChunkCap = 0, gChunkLen = 0;
+static char gChunkId[40] = "";
+static int gChunkNext = 0, gChunkTotal = 0;
 
 /* ArduinoJson out of PSRAM: sync payloads can be several KB and internal heap
  * is often spoken for by TLS on these parts. Falls back to internal RAM if the
@@ -270,6 +282,7 @@ static void handleServerMessage(const char *json, size_t len) {
           break;
         }
       unlock();
+      if (!updated) { if (mod["errorData"].is<JsonVariantConst>()) serializeJson(mod["errorData"], gErrData, sizeof(gErrData)); else gErrData[0] = 0; }
       if (cb) cb(updated, updated ? mod["value"] : JsonVariantConst());
     }
     return;
@@ -285,14 +298,48 @@ static void handleServerMessage(const char *json, size_t len) {
         cb = gReqs[i].cb; gReqs[i].active = false; break;
       }
     unlock();
+    if (!success) { if (d["errorData"].is<JsonVariantConst>()) serializeJson(d["errorData"], gErrData, sizeof(gErrData)); else gErrData[0] = 0; }
     if (cb) cb(success, d["result"]);
+    return;
+  }
+
+  if (!strcmp(type, "TransitionChunk")) {
+    // Ordered parts, concatenated, then parsed as one Transition (as the JS
+    // client does). Bounded by CONVEX_RX_MAX; a bad sequence resets and drops.
+    const char *tid = d["transitionId"] | "";
+    int part = d["partNumber"] | -1, total = d["totalParts"] | 0;
+    const char *chunk = d["chunk"] | "";
+    if (part == 0 || strcmp(tid, gChunkId) != 0) {   // start a new assembly
+      gChunkLen = 0; gChunkNext = 0; gChunkTotal = total;
+      snprintf(gChunkId, sizeof(gChunkId), "%s", tid);
+    }
+    if (part != gChunkNext || total != gChunkTotal || total <= 0) {
+      gChunkLen = 0; gChunkId[0] = 0; snprintf(gErr, sizeof(gErr), "bad chunk seq"); return;
+    }
+    size_t clen = strlen(chunk);
+    if (gChunkLen + clen > (size_t)CONVEX_RX_MAX) {
+      gChunkLen = 0; gChunkId[0] = 0; snprintf(gErr, sizeof(gErr), "chunk overflow"); return;
+    }
+    if (gChunkLen + clen + 1 > gChunkCap) {
+      size_t want = gChunkLen + clen + 512;
+      char *nb = (char *)heap_caps_realloc(gChunk, want, MALLOC_CAP_SPIRAM);
+      if (!nb) nb = (char *)realloc(gChunk, want);
+      if (!nb) { gChunkLen = 0; gChunkId[0] = 0; snprintf(gErr, sizeof(gErr), "chunk oom"); return; }
+      gChunk = nb; gChunkCap = want;
+    }
+    memcpy(gChunk + gChunkLen, chunk, clen); gChunkLen += clen; gChunkNext++;
+    if (gChunkNext >= gChunkTotal) {                 // complete: parse as a Transition
+      size_t len2 = gChunkLen; gChunkLen = 0; gChunkId[0] = 0;
+      handleServerMessage(gChunk, len2);
+    }
     return;
   }
 
   if (!strcmp(type, "AuthError")) {
     const char *err = d["error"] | "?";
     snprintf(gErr, sizeof(gErr), "auth: %s", err);
-    if (gAuthCb) gAuthCb(err, gAuthUser);   // app should re-mint and convexSetAuth()
+    if (gAuthCb) gAuthCb(err, gAuthUser);   // manual mode: app re-mints and convexSetAuth()
+    if (gTokenFn) fetchAndSetToken(true);   // provider mode: force a fresh token now
     return;
   }
   if (!strcmp(type, "FatalError")) {
@@ -301,9 +348,7 @@ static void handleServerMessage(const char *json, size_t len) {
     cxwsPenalize();
     return;
   }
-  // Ping needs no reply; chunked transitions are only emitted for very large
-  // results, which a device is unlikely to subscribe to.
-  if (!strcmp(type, "TransitionChunk")) snprintf(gErr, sizeof(gErr), "unhandled TransitionChunk");
+  // Ping needs no reply (handled at the frame layer); anything else is ignored.
 }
 
 /* ---- websocket event task ------------------------------------------- */
@@ -343,7 +388,10 @@ static void appendRx(const char *p, size_t n) {
 }
 
 static void onWsState(bool up) {
-  if (up) { gRxLen = 0; onConnected(); }
+  if (up) {
+    fetchAndSetToken(false);   // refresh the token for this connection (lock not held here)
+    gRxLen = 0; onConnected();
+  }
   else {
     gConnected = false;
     snprintf(gLastCloseReason, sizeof(gLastCloseReason), "disconnected");
@@ -420,9 +468,79 @@ void convexEnd() {
     if (gSubs[i].lastVal) { heap_caps_free(gSubs[i].lastVal); gSubs[i].lastVal = nullptr; gSubs[i].lastLen = 0; }
   }
   for (int i = 0; i < MAX_REQS; ++i) { gReqs[i].active = false; gReqs[i].cb = ConvexResultFn(); }
+  if (gChunk) { heap_caps_free(gChunk); gChunk = nullptr; gChunkCap = 0; }
+  gChunkLen = 0; gChunkId[0] = 0; gTokenRefreshAtMs = 0;
   unlock();
   gStarted = false;
   gConnected = false;
+}
+
+// ---- proactive auth refresh ----
+
+static int b64urlDecode(const char *in, size_t n, uint8_t *out, size_t cap) {
+  auto val = [](char c) -> int {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '-') return 62;
+    if (c == '_') return 63;
+    return -1;
+  };
+  size_t o = 0; int acc = 0, bits = 0;
+  for (size_t i = 0; i < n; ++i) {
+    int v = val(in[i]); if (v < 0) continue;
+    acc = (acc << 6) | v; bits += 6;
+    if (bits >= 8) { bits -= 8; if (o >= cap) return -1; out[o++] = (uint8_t)((acc >> bits) & 0xff); }
+  }
+  return (int)o;
+}
+
+// Lifetime (seconds) from a JWT's exp-iat, or 0 if not derivable.
+static uint32_t jwtLifetimeSec(const char *token) {
+  const char *d1 = strchr(token, '.'); if (!d1) return 0;
+  const char *d2 = strchr(d1 + 1, '.'); if (!d2) return 0;
+  uint8_t buf[600];
+  int n = b64urlDecode(d1 + 1, (size_t)(d2 - (d1 + 1)), buf, sizeof(buf) - 1);
+  if (n <= 0) return 0; buf[n] = 0;
+  JsonDocument doc(&gJson);
+  if (deserializeJson(doc, buf, (size_t)n)) return 0;
+  long exp = doc["exp"] | 0L, iat = doc["iat"] | 0L;
+  return (exp > 0 && iat > 0 && exp > iat) ? (uint32_t)(exp - iat) : 0;
+}
+
+static void scheduleRefresh(const char *token) {
+  if (!gTokenFn) { gTokenRefreshAtMs = 0; return; }
+  uint32_t life = jwtLifetimeSec(token);
+  if (!life) life = CONVEX_AUTH_DEFAULT_LIFETIME_S;
+  uint32_t leeway = CONVEX_AUTH_LEEWAY_S;
+  uint32_t ahead = life > leeway ? (life - leeway) : life / 2;
+  gTokenRefreshAtMs = millis() + ahead * 1000;
+  if (gTokenRefreshAtMs == 0) gTokenRefreshAtMs = 1;   // 0 means "never"
+}
+
+static void fetchAndSetToken(bool force) {
+  if (!gTokenFn) return;
+  char buf[800];
+  buf[0] = 0;
+  if (!gTokenFn(force, buf, sizeof(buf), gTokenUser) || !buf[0]) return;
+  // If the provider hands back the token we already have, do not re-send it --
+  // otherwise an AuthError on a stale token would loop (send -> AuthError ->
+  // refetch same -> send ...). Just reschedule and wait for a genuinely new one.
+  if (strcmp(buf, gToken) == 0) { scheduleRefresh(buf); return; }
+  convexSetAuth(buf);            // stores; sends live if connected
+  scheduleRefresh(buf);
+}
+
+// Runs ~once a second on the socket task (registered as the transport tick).
+static void authTick() {
+  if (gTokenFn && gTokenRefreshAtMs && (int32_t)(millis() - gTokenRefreshAtMs) >= 0)
+    fetchAndSetToken(true);
+}
+
+void convexSetAuthProvider(ConvexTokenFn fn, void *user) {
+  gTokenFn = fn; gTokenUser = user;
+  cxwsOnTick(authTick);
+  if (gConnected) fetchAndSetToken(false);
 }
 
 void convexSetAuth(const char *token) {

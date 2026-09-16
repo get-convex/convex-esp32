@@ -48,6 +48,10 @@ enum ConvexStatus {
 /* The status of the most recent failed call, and a human-readable detail. */
 ConvexStatus convexLastStatus();
 const char  *convexStatusStr(ConvexStatus s);
+/* The `errorData` of the most recent failed query/mutation/action, as a JSON
+ * string (a ConvexError's structured payload), or "" if none. Read it from
+ * within the failing callback. */
+const char  *convexLastErrorData();
 
 // ---- reactive sync (WebSocket) --------------------------------------------
 
@@ -81,6 +85,15 @@ bool convexConnected();
 /* Set (nullptr clears) the auth token sent to Convex as a "User" identity. It
  * takes effect on the next (re)connect and is re-sent after every reconnect. */
 void convexSetAuth(const char *token);
+
+/* Proactive auth: supply a token PROVIDER instead of a static token. It is
+ * called to fetch a token on connect, again before the token expires (parsed
+ * from the JWT's exp/iat, minus a leeway), and with force=true after an
+ * AuthError. Write the token into `out` (<= cap) and return true; return false
+ * if none is available. This mirrors the JS client's setAuth(fetchToken) and is
+ * the right choice for a device that stays up longer than a token lives. */
+typedef bool (*ConvexTokenFn)(bool force, char *out, size_t cap, void *user);
+void convexSetAuthProvider(ConvexTokenFn fn, void *user);
 
 /* One state handler; nullptr clears. */
 void convexOnState(ConvexStateCb cb, void *user);

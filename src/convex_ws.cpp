@@ -33,6 +33,8 @@ static bool gBundleSet = false;
 
 static uint32_t gBackoffMs = CONVEX_RECONNECT_BASE_MS;
 static volatile bool gPenalized = false;   // set by cxwsPenalize() on a FatalError
+static CxWsTickFn gOnTick = nullptr;
+void cxwsOnTick(CxWsTickFn fn) { gOnTick = fn; }
 
 // A jittered wait derived from the current backoff (full jitter: 0..backoff).
 static uint32_t nextBackoff() {
@@ -169,7 +171,9 @@ static bool connectOnce() {
 static void serviceLoop() {
   std::string in; uint8_t msgOp = 0x1; std::string msg;
   uint8_t buf[1536];
+  uint32_t lastTick = millis();
   while (gRunning && !gPaused && gTls.connected() && gConnected) {
+    if (gOnTick && (uint32_t)(millis() - lastTick) >= 1000) { lastTick = millis(); gOnTick(); }
     bool did = false;
     int avail = gTls.available();
     if (avail > 0) {

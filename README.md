@@ -28,7 +28,10 @@ way a Convex web app updates.
 
 - **Reactive query subscriptions** — `convexSubscribe`, with a callback on every change.
 - **Mutations and actions** over the socket — `convexMutation`, `convexAction`.
-- **Auth** — `convexSetAuth` (sent as a Convex `User` identity), re-sent on reconnect.
+- **Auth** — `convexSetAuth` (sent as a Convex `User` identity), re-sent on reconnect,
+  or `convexSetAuthProvider` for a token refreshed proactively before it expires.
+- **Chunked transitions** — very large query results split by the server across
+  `TransitionChunk`s are reassembled transparently.
 - **Automatic reconnect** with full query-set + auth + in-flight-request replay.
 - **HTTP actions** — `convexHttpAction` for the routes you define with `httpAction`.
 - **Telemetry** — `convexReportEvent` / `convexEnableTelemetry`, using the
@@ -38,9 +41,10 @@ way a Convex web app updates.
 
 ### Not (yet) handled
 
-`TransitionChunk` reassembly (only emitted for very large query results),
-pagination journals, and optimistic updates. Query/request tables are small and
-fixed-size (12 subscriptions, 8 in-flight requests). PRs welcome.
+Pagination journals and optimistic updates (both UI-centric, rarely needed on a
+device), and query de-duplication (identical subscriptions each get their own
+server query). Query/request tables are small and fixed-size (12 subscriptions,
+8 in-flight requests). PRs welcome.
 
 ## Requirements
 
@@ -139,6 +143,7 @@ See [`examples/ReactiveQuery`](examples/ReactiveQuery) for a complete sketch.
 | `convexSetAuth(token)` | Set/clear the `User` auth token. |
 | `convexOnState(cb, user)` | Connect/disconnect callback. |
 | `convexOnAuthError(cb, user)` | Fires when the server rejects the token — re-mint and `convexSetAuth()`. |
+| `convexSetAuthProvider(fn, user)` | Proactive auth: a token provider called on connect, before expiry, and on AuthError. |
 | `convexSubscribe(udfPath[, args][, cb[, user]][, cache])` | Reactive query; returns a queryId. Cached by default; optional push callback (lambda or C fn+user); `cache=false` for push-only. |
 | `convexQueryChanged(queryId)` / `convexQueryValue(queryId, out)` | Poll a subscription's latest value. |
 | `convexQueryOnce(udfPath[, args], cb)` | One-shot query: first value, then auto-unsubscribe. |
