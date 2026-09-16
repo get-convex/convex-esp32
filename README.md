@@ -138,32 +138,75 @@ See [`examples/ReactiveQuery`](examples/ReactiveQuery) for a complete sketch.
 | `convexConnected()` | Is the socket up. |
 | `convexSetAuth(token)` | Set/clear the `User` auth token. |
 | `convexOnState(cb, user)` | Connect/disconnect callback. |
-| `convexSubscribe(udfPath, args, cb, user)` | Reactive query; returns a queryId. |
+| `convexSubscribe(udfPath, args, cb, user)` | Reactive query, C callback; returns a queryId. |
+| `convexSubscribe(udfPath, args, lambda)` | Same, `std::function` (can capture). |
+| `convexSubscribe(udfPath, args)` | Cached, no callback — poll it from `loop()`. |
+| `convexQueryChanged(queryId)` / `convexQueryValue(queryId, out)` | Poll a cached subscription. |
 | `convexUnsubscribe(queryId)` | Drop a subscription. |
-| `convexMutation(udfPath, args, cb, user)` | Run a mutation; returns a requestId. |
-| `convexAction(udfPath, args, cb, user)` | Run an action; returns a requestId. |
+| `convexMutation/Action(udfPath, args, cb[, user])` | Run it; C or `std::function` callback. |
 | `convexPause()` / `convexResume()` | Release / re-establish the socket (e.g. to free TLS heap). |
-| `convexHttpAction(method, pathOrUrl, body, token, resp, cap[, contentType])` | Call an `httpAction` route. |
+| `convexHttpAction(method, pathOrUrl, body, token, resp, cap[, contentType, keepSocket])` | Call an `httpAction` route. |
 | `convexReportEvent(eventType, event)` | Send a telemetry `Event`. |
 | `convexEnableTelemetry(on)` | Auto-emit `ClientConnect` on connect. |
-| `convexLastError()`, `convexSubCount()`, `convexBytesIn/Out()` | Diagnostics. |
+| `convexLastError()`, `convexSubCount()`, `convexBytesIn/Out()`, `convexHeapLowWater()` | Diagnostics. |
 
-Callbacks fire from the socket's background task — keep them short, copy what you
-keep, and never block.
+### Reading a query: callback or poll
+
+Two consumption models. **Callbacks** fire from the socket's background task —
+keep them short, copy what you keep, never block. **Or subscribe without a
+callback** and poll the cached value from your own `loop()` — nothing runs on
+the socket task, so there are no cross-thread footguns:
+
+```cpp
+int q = convexSubscribe("messages:list", args);   // cached; no callback
+// in loop():
+if (convexQueryChanged(q)) {
+  JsonDocument doc;
+  if (convexQueryValue(q, doc)) { /* newest value, on your thread */ }
+}
+```
+
+Only a no-callback subscription keeps a cached copy (a callback one doesn't, to
+save memory).
+
+## Memory & tuning
+
+The ESP32 killers are the TLS session (~40 KB peak), unbounded JSON, and
+fragmentation. This library is built to bound all three, and to degrade instead
+of crash:
+
+- **One TLS session.** The socket holds one open. `convexHttpAction` needs its
+  own, so by default it **pauses the socket** for the call and resumes after
+  (pass `keepSocket=true` to skip). `convexPause()/Resume()` do the same around
+  your own HTTPS. A live sync socket can often *replace* your polling outright.
+- **Bounded, fail-soft buffers.** A message over `CONVEX_RX_MAX` is dropped with
+  an error, never grown; the send queue is capped at `CONVEX_SEND_QUEUE_MAX`.
+- **Low-heap guard.** `convexBegin` refuses to open TLS below `CONVEX_MIN_HEAP`,
+  returning an error instead of crashing mid-handshake. Watch
+  `convexHeapLowWater()`.
+- **Compile-time knobs** (override with `-D`): `CONVEX_MAX_SUBS` (12),
+  `CONVEX_MAX_REQS` (8), `CONVEX_ARGS_BUF` (320), `CONVEX_RX_MAX`
+  (48 KB with PSRAM, 8 KB without), `CONVEX_MIN_HEAP` (45000),
+  `CONVEX_SEND_QUEUE_MAX` (16).
+- **Keep payloads small.** Subscribe to *narrow* queries and let the server do
+  the shaping — a projected query or an `httpAction` returning a minimal (even
+  packed/base64) body beats materializing a big document on the device.
+
+### Shrink the TLS record buffers (biggest single win)
+
+mbedTLS defaults to 16 KB in + 16 KB out per session; Convex sync frames are
+small, so on an ESP-IDF build you can reclaim ~25 KB with:
+
+```
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=2048
+```
 
 ## TLS
 
 By default the client validates the server against the ESP32 core's embedded
 root CA bundle. To use your own bundle, or (for development only) to disable
 verification, see `cxwsSetCACertBundle` in `src/convex_ws.h`.
-
-## A note on heap
-
-The socket holds one TLS session open for its lifetime. On parts where only one
-TLS session fits at a time, coordinate with any other HTTPS you do:
-`convexPause()` releases the session for a large upload and `convexResume()`
-reconnects and replays every subscription. A persistent sync socket can often
-*replace* your polling and HTTP calls outright, which is a net win.
 
 ## License
 

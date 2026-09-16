@@ -4,9 +4,10 @@
 #include <string.h>
 
 /* Convex HTTP actions: the routes you register with httpAction(), served on
- * <deployment>.convex.site. Self-contained -- esp_http_client with the IDF cert
- * bundle for TLS -- so it shares nothing with the sync socket and needs no
- * other transport in your firmware. */
+ * <deployment>.convex.site. esp_http_client with the IDF cert bundle for TLS.
+ * An HTTP action needs its own TLS session; on tight boards it can't share the
+ * heap with a live sync socket, so by default we pause the socket for the call
+ * (see keepSocket). */
 
 static char gSite[160] = "";   // https://<dep>.convex.site, set by convexBegin
 
@@ -22,9 +23,28 @@ static esp_http_client_method_t methodOf(const char *m) {
   return HTTP_METHOD_GET;
 }
 
+static int httpActionRaw(const char *method, const char *pathOrUrl, const char *body,
+                         const char *token, char *resp, size_t respCap,
+                         const char *contentType);
+
 int convexHttpAction(const char *method, const char *pathOrUrl, const char *body,
                      const char *token, char *resp, size_t respCap,
-                     const char *contentType) {
+                     const char *contentType, bool keepSocket) {
+  // Lend the single TLS session to this call unless told not to.
+  bool paused = false;
+  if (!keepSocket && convexConnected()) {
+    convexPause();
+    paused = true;
+    for (int i = 0; i < 40 && convexConnected(); ++i) delay(25);  // let it release
+  }
+  int status = httpActionRaw(method, pathOrUrl, body, token, resp, respCap, contentType);
+  if (paused) convexResume();
+  return status;
+}
+
+static int httpActionRaw(const char *method, const char *pathOrUrl, const char *body,
+                         const char *token, char *resp, size_t respCap,
+                         const char *contentType) {
   if (resp && respCap) resp[0] = 0;
 
   char url[256];

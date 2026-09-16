@@ -1,4 +1,5 @@
 #include "convex_ws.h"
+#include "convex_config.h"
 #include <WiFiClientSecure.h>
 #include <esp_random.h>
 #include <freertos/FreeRTOS.h>
@@ -91,6 +92,9 @@ static void queueFrame(uint8_t opcode, const char *p, size_t n) {
   f.append(p, n);
   for (size_t j = 0; j < n; ++j) f[base + j] ^= mask[j % 4];
   xSemaphoreTake(gSendMx, portMAX_DELAY);
+  // Bound the queue: if the socket has stalled, drop the oldest rather than let
+  // the backlog grow the heap without limit.
+  while (gSendQ.size() >= (size_t)CONVEX_SEND_QUEUE_MAX) gSendQ.pop_front();
   gSendQ.push_back(std::move(f));
   xSemaphoreGive(gSendMx);
 }

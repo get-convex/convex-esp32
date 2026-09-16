@@ -15,27 +15,29 @@
 
 static const char *SYNC_PROTO_VERSION = "1.45.0";
 
-#define MAX_SUBS 12
-#define MAX_REQS 8
-#define RX_MAX   (48 * 1024)   // largest reassembled message we will hold
+#define MAX_SUBS CONVEX_MAX_SUBS
+#define MAX_REQS CONVEX_MAX_REQS
+#define RX_MAX   CONVEX_RX_MAX    // largest reassembled message we will hold
 
 struct Sub {
   bool active;
   int  queryId;
-  char udfPath[72];
-  char args[320];          // serialized args object; "{}" when empty
-  ConvexQueryCb cb;
-  void *user;
+  char udfPath[CONVEX_UDF_BUF];
+  char args[CONVEX_ARGS_BUF];   // serialized args object; "{}" when empty
+  ConvexQueryFn cb;             // empty for a cached (poll) subscription
+  bool cached;                  // keep the latest value for convexQueryValue()
+  char *lastVal;               // serialized latest value (heap), null until first
+  size_t lastLen;
+  volatile bool changed;       // set on each update, cleared by convexQueryChanged
 };
 
 struct Req {
   bool active;
   int  requestId;
   bool isAction;           // false = mutation
-  char udfPath[72];
-  char args[320];
-  ConvexResultCb cb;
-  void *user;
+  char udfPath[CONVEX_UDF_BUF];
+  char args[CONVEX_ARGS_BUF];
+  ConvexResultFn cb;
 };
 
 static bool gStarted = false;
@@ -47,6 +49,7 @@ static Sub gSubs[MAX_SUBS];
 static Req gReqs[MAX_REQS];
 static int gNextQueryId = 0;
 static int gNextRequestId = 0;
+static uint32_t gHeapLow = 0xffffffff;
 
 static char gSessionId[40] = "";
 static int  gConnectionCount = 0;
@@ -87,10 +90,16 @@ static PsramAlloc gJson;
 static void lock()   { if (gLock) xSemaphoreTake(gLock, portMAX_DELAY); }
 static void unlock() { if (gLock) xSemaphoreGive(gLock); }
 
+static void sampleHeap() {
+  uint32_t h = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  if (h < gHeapLow) gHeapLow = h;
+}
+
 const char *convexLastError() { return gErr; }
 bool convexConnected()        { return gConnected; }
 uint32_t convexBytesIn()      { return gBytesIn; }
 uint32_t convexBytesOut()     { return gBytesOut; }
+uint32_t convexHeapLowWater() { return gHeapLow; }
 int convexSubCount() {
   int n = 0; for (int i = 0; i < MAX_SUBS; ++i) if (gSubs[i].active) ++n; return n;
 }
@@ -199,7 +208,21 @@ static void sendEvent(const char *eventType, JsonVariantConst event) {
 
 /* ---- inbound dispatch ------------------------------------------------- */
 
+// Store a query's latest value for the poll API (call with gLock held).
+static void cacheValue(Sub &s, JsonVariantConst value) {
+  size_t n = measureJson(value);
+  if (n > (size_t)CONVEX_RX_MAX) { snprintf(gErr, sizeof(gErr), "cached value too big"); return; }
+  char *nb = (char *)heap_caps_realloc(s.lastVal, n + 1, MALLOC_CAP_SPIRAM);
+  if (!nb) nb = (char *)realloc(s.lastVal, n + 1);
+  if (!nb) { snprintf(gErr, sizeof(gErr), "cache oom"); return; }
+  s.lastVal = nb;
+  serializeJson(value, s.lastVal, n + 1);
+  s.lastLen = n;
+  s.changed = true;
+}
+
 static void handleServerMessage(const char *json, size_t len) {
+  sampleHeap();
   JsonDocument d(&gJson);
   if (deserializeJson(d, json, len)) { snprintf(gErr, sizeof(gErr), "bad server json"); return; }
   const char *type = d["type"] | "";
@@ -210,14 +233,19 @@ static void handleServerMessage(const char *json, size_t len) {
     for (JsonVariantConst mod : d["modifications"].as<JsonArrayConst>()) {
       const char *mt = mod["type"] | "";
       int qid = mod["queryId"] | -1;
-      ConvexQueryCb cb = nullptr; void *user = nullptr;
+      bool updated = !strcmp(mt, "QueryUpdated");
+      bool failed  = !strcmp(mt, "QueryFailed");
+      if (!updated && !failed) continue;
+      ConvexQueryFn cb;
       lock();
       for (int i = 0; i < MAX_SUBS; ++i)
-        if (gSubs[i].active && gSubs[i].queryId == qid) { cb = gSubs[i].cb; user = gSubs[i].user; break; }
+        if (gSubs[i].active && gSubs[i].queryId == qid) {
+          if (gSubs[i].cached && updated) cacheValue(gSubs[i], mod["value"]);
+          cb = gSubs[i].cb;   // copy; may be empty (cached-only subscription)
+          break;
+        }
       unlock();
-      if (!cb) continue;
-      if (!strcmp(mt, "QueryUpdated")) cb(qid, true, mod["value"], user);
-      else if (!strcmp(mt, "QueryFailed")) cb(qid, false, JsonVariantConst(), user);
+      if (cb) cb(updated, updated ? mod["value"] : JsonVariantConst());
     }
     return;
   }
@@ -225,14 +253,14 @@ static void handleServerMessage(const char *json, size_t len) {
   if (!strcmp(type, "MutationResponse") || !strcmp(type, "ActionResponse")) {
     int rid = d["requestId"] | -1;
     bool success = d["success"] | false;
-    ConvexResultCb cb = nullptr; void *user = nullptr;
+    ConvexResultFn cb;
     lock();
     for (int i = 0; i < MAX_REQS; ++i)
       if (gReqs[i].active && gReqs[i].requestId == rid) {
-        cb = gReqs[i].cb; user = gReqs[i].user; gReqs[i].active = false; break;
+        cb = gReqs[i].cb; gReqs[i].active = false; break;
       }
     unlock();
-    if (cb) cb(rid, success, d["result"], user);
+    if (cb) cb(success, d["result"]);
     return;
   }
 
@@ -316,6 +344,12 @@ static void makeSessionId() {
 bool convexBegin(const char *cloudUrl) {
   if (gStarted) return true;
   if (!gLock) gLock = xSemaphoreCreateMutex();
+  sampleHeap();
+  uint32_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  if (freeHeap < (uint32_t)CONVEX_MIN_HEAP) {
+    snprintf(gErr, sizeof(gErr), "low heap %u < %u; not opening TLS", freeHeap, (unsigned)CONVEX_MIN_HEAP);
+    return false;
+  }
   gConnectStartMs = millis();
   makeSessionId();
 
@@ -343,6 +377,14 @@ bool convexBegin(const char *cloudUrl) {
 void convexEnd() {
   if (!gStarted) return;
   cxwsEnd();
+  lock();
+  for (int i = 0; i < MAX_SUBS; ++i) {
+    gSubs[i].active = false;
+    gSubs[i].cb = ConvexQueryFn();
+    if (gSubs[i].lastVal) { heap_caps_free(gSubs[i].lastVal); gSubs[i].lastVal = nullptr; gSubs[i].lastLen = 0; }
+  }
+  for (int i = 0; i < MAX_REQS; ++i) { gReqs[i].active = false; gReqs[i].cb = ConvexResultFn(); }
+  unlock();
   gStarted = false;
   gConnected = false;
 }
@@ -356,8 +398,8 @@ void convexSetAuth(const char *token) {
   unlock();
 }
 
-int convexSubscribe(const char *udfPath, const JsonDocument &args,
-                    ConvexQueryCb cb, void *user) {
+static int subscribeImpl(const char *udfPath, const JsonDocument &args,
+                         ConvexQueryFn cb, bool cached) {
   lock();
   int slot = -1;
   for (int i = 0; i < MAX_SUBS; ++i) if (!gSubs[i].active) { slot = i; break; }
@@ -368,11 +410,56 @@ int convexSubscribe(const char *udfPath, const JsonDocument &args,
   snprintf(s.udfPath, sizeof(s.udfPath), "%s", udfPath);
   serializeJson(args, s.args, sizeof(s.args));
   if (!s.args[0]) strcpy(s.args, "{}");
-  s.cb = cb; s.user = user;
+  s.cb = std::move(cb);
+  s.cached = cached;
+  s.lastVal = nullptr; s.lastLen = 0; s.changed = false;
   int qid = s.queryId;
   if (gConnected) sendAddQuery(s);
   unlock();
   return qid;
+}
+
+int convexSubscribe(const char *udfPath, const JsonDocument &args,
+                    ConvexQueryCb cb, void *user) {
+  // Wrap the C-style callback; queryId is fixed once the slot is assigned.
+  int qid = subscribeImpl(udfPath, args, ConvexQueryFn(), false);
+  if (qid < 0 || !cb) return qid;
+  lock();
+  for (int i = 0; i < MAX_SUBS; ++i)
+    if (gSubs[i].active && gSubs[i].queryId == qid) {
+      gSubs[i].cb = [cb, user, qid](bool ok, JsonVariantConst v) { cb(qid, ok, v, user); };
+      break;
+    }
+  unlock();
+  return qid;
+}
+int convexSubscribe(const char *udfPath, const JsonDocument &args, ConvexQueryFn cb) {
+  return subscribeImpl(udfPath, args, std::move(cb), false);
+}
+int convexSubscribe(const char *udfPath, const JsonDocument &args) {
+  return subscribeImpl(udfPath, args, ConvexQueryFn(), /*cached=*/true);
+}
+
+bool convexQueryChanged(int queryId) {
+  bool c = false;
+  lock();
+  for (int i = 0; i < MAX_SUBS; ++i)
+    if (gSubs[i].active && gSubs[i].queryId == queryId) { c = gSubs[i].changed; gSubs[i].changed = false; break; }
+  unlock();
+  return c;
+}
+
+bool convexQueryValue(int queryId, JsonDocument &out) {
+  bool ok = false;
+  lock();
+  for (int i = 0; i < MAX_SUBS; ++i)
+    if (gSubs[i].active && gSubs[i].queryId == queryId) {
+      if (gSubs[i].lastVal && gSubs[i].lastLen)
+        ok = (deserializeJson(out, gSubs[i].lastVal, gSubs[i].lastLen) == DeserializationError::Ok);
+      break;
+    }
+  unlock();
+  return ok;
 }
 
 void convexUnsubscribe(int queryId) {
@@ -380,14 +467,19 @@ void convexUnsubscribe(int queryId) {
   for (int i = 0; i < MAX_SUBS; ++i)
     if (gSubs[i].active && gSubs[i].queryId == queryId) {
       gSubs[i].active = false;
+      gSubs[i].cb = ConvexQueryFn();
+      if (gSubs[i].lastVal) { heap_caps_free(gSubs[i].lastVal); gSubs[i].lastVal = nullptr; gSubs[i].lastLen = 0; }
       if (gConnected) sendRemoveQuery(queryId);
       break;
     }
   unlock();
 }
 
-static int enqueueRequest(const char *udfPath, const JsonDocument &args,
-                          bool isAction, ConvexResultCb cb, void *user) {
+// `makeCb(rid)` builds the result callback once the requestId is assigned, so a
+// raw ConvexResultCb sees the real id and the cb is in place before we send
+// (no chance the response beats it).
+static int enqueueRequest(const char *udfPath, const JsonDocument &args, bool isAction,
+                          const std::function<ConvexResultFn(int rid)> &makeCb) {
   lock();
   if (!gConnected) { unlock(); snprintf(gErr, sizeof(gErr), "offline"); return -1; }
   int slot = -1;
@@ -400,18 +492,34 @@ static int enqueueRequest(const char *udfPath, const JsonDocument &args,
   snprintf(r.udfPath, sizeof(r.udfPath), "%s", udfPath);
   serializeJson(args, r.args, sizeof(r.args));
   if (!r.args[0]) strcpy(r.args, "{}");
-  r.cb = cb; r.user = user;
   int rid = r.requestId;
+  r.cb = makeCb(rid);
   sendRequest(r);
   unlock();
   return rid;
 }
 
+static std::function<ConvexResultFn(int)> rawResult(ConvexResultCb cb, void *user) {
+  return [cb, user](int rid) -> ConvexResultFn {
+    if (!cb) return ConvexResultFn();
+    return [cb, user, rid](bool ok, JsonVariantConst r) { cb(rid, ok, r, user); };
+  };
+}
+static std::function<ConvexResultFn(int)> fnResult(ConvexResultFn cb) {
+  return [cb](int) -> ConvexResultFn { return cb; };
+}
+
 int convexMutation(const char *udfPath, const JsonDocument &args, ConvexResultCb cb, void *user) {
-  return enqueueRequest(udfPath, args, false, cb, user);
+  return enqueueRequest(udfPath, args, false, rawResult(cb, user));
 }
 int convexAction(const char *udfPath, const JsonDocument &args, ConvexResultCb cb, void *user) {
-  return enqueueRequest(udfPath, args, true, cb, user);
+  return enqueueRequest(udfPath, args, true, rawResult(cb, user));
+}
+int convexMutation(const char *udfPath, const JsonDocument &args, ConvexResultFn cb) {
+  return enqueueRequest(udfPath, args, false, fnResult(std::move(cb)));
+}
+int convexAction(const char *udfPath, const JsonDocument &args, ConvexResultFn cb) {
+  return enqueueRequest(udfPath, args, true, fnResult(std::move(cb)));
 }
 
 void convexPause() {
