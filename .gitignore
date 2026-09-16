@@ -1,0 +1,14 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+# ESP-IDF component manager (fetched per-build)
+managed_components/
+dependencies.lock
+# Editor / OS
+.vscode/
+.DS_Store
+
+# pio/idf-generated in example dirs
+examples/*/CMakeLists.txt
+examples/*/sdkconfig*

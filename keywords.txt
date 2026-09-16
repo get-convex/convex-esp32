@@ -1,0 +1,25 @@
+# Syntax coloring for the Convex ESP32 library (Arduino IDE)
+
+convexBegin	KEYWORD2
+convexEnd	KEYWORD2
+convexConnected	KEYWORD2
+convexSetAuth	KEYWORD2
+convexOnState	KEYWORD2
+convexSubscribe	KEYWORD2
+convexUnsubscribe	KEYWORD2
+convexMutation	KEYWORD2
+convexAction	KEYWORD2
+convexPause	KEYWORD2
+convexResume	KEYWORD2
+convexLastError	KEYWORD2
+convexSubCount	KEYWORD2
+convexBytesIn	KEYWORD2
+convexBytesOut	KEYWORD2
+convexReportEvent	KEYWORD2
+convexEnableTelemetry	KEYWORD2
+convexHttpAction	KEYWORD2
+convexSetHttpBase	KEYWORD2
+
+ConvexQueryCb	KEYWORD1
+ConvexResultCb	KEYWORD1
+ConvexStateCb	KEYWORD1

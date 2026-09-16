@@ -1,0 +1,70 @@
+#include "Convex.h"
+#include <esp_http_client.h>
+#include <esp_crt_bundle.h>
+#include <string.h>
+
+/* Convex HTTP actions: the routes you register with httpAction(), served on
+ * <deployment>.convex.site. Self-contained -- esp_http_client with the IDF cert
+ * bundle for TLS -- so it shares nothing with the sync socket and needs no
+ * other transport in your firmware. */
+
+static char gSite[160] = "";   // https://<dep>.convex.site, set by convexBegin
+
+void convexSetHttpBase(const char *siteUrl) {
+  snprintf(gSite, sizeof(gSite), "%s", siteUrl ? siteUrl : "");
+}
+
+static esp_http_client_method_t methodOf(const char *m) {
+  if (!strcasecmp(m, "POST"))   return HTTP_METHOD_POST;
+  if (!strcasecmp(m, "PUT"))    return HTTP_METHOD_PUT;
+  if (!strcasecmp(m, "PATCH"))  return HTTP_METHOD_PATCH;
+  if (!strcasecmp(m, "DELETE")) return HTTP_METHOD_DELETE;
+  return HTTP_METHOD_GET;
+}
+
+int convexHttpAction(const char *method, const char *pathOrUrl, const char *body,
+                     const char *token, char *resp, size_t respCap,
+                     const char *contentType) {
+  if (resp && respCap) resp[0] = 0;
+
+  char url[256];
+  if (!strncmp(pathOrUrl, "http", 4)) {
+    snprintf(url, sizeof(url), "%s", pathOrUrl);
+  } else if (gSite[0]) {
+    snprintf(url, sizeof(url), "%s%s%s", gSite, pathOrUrl[0] == '/' ? "" : "/", pathOrUrl);
+  } else {
+    return -1;   // no base and not absolute: caller must convexBegin() or pass a URL
+  }
+
+  esp_http_client_config_t cfg = {};
+  cfg.url = url;
+  cfg.crt_bundle_attach = esp_crt_bundle_attach;
+  cfg.timeout_ms = 20000;
+  cfg.method = methodOf(method);
+  esp_http_client_handle_t c = esp_http_client_init(&cfg);
+  if (!c) return -2;
+
+  if (body) esp_http_client_set_header(c, "Content-Type", contentType ? contentType : "application/json");
+  if (token) {
+    char auth[840];
+    snprintf(auth, sizeof(auth), "Bearer %s", token);
+    esp_http_client_set_header(c, "Authorization", auth);
+  }
+
+  size_t bodyLen = body ? strlen(body) : 0;
+  esp_err_t err = esp_http_client_open(c, bodyLen);
+  if (err != ESP_OK) { esp_http_client_cleanup(c); return -3; }
+  if (bodyLen) {
+    int w = esp_http_client_write(c, body, bodyLen);
+    if (w < 0) { esp_http_client_close(c); esp_http_client_cleanup(c); return -4; }
+  }
+  esp_http_client_fetch_headers(c);
+  int status = esp_http_client_get_status_code(c);
+  if (resp && respCap > 1) {
+    int r = esp_http_client_read_response(c, resp, (int)respCap - 1);
+    resp[r > 0 ? r : 0] = 0;
+  }
+  esp_http_client_close(c);
+  esp_http_client_cleanup(c);
+  return status;
+}
