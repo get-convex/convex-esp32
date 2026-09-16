@@ -108,6 +108,13 @@ int  convexSubscribe(const char *udfPath, const char *argsJson,
                      ConvexQueryFn cb = ConvexQueryFn(), bool cache = true);
 void convexUnsubscribe(int queryId);
 
+/* One-shot query: subscribe, deliver the first value to `cb`, then auto-
+ * unsubscribe. The embedded equivalent of the JS client's query() -- read a
+ * value once without holding a subscription. Returns a queryId (>=0, already
+ * self-cancelling) or a negative ConvexStatus. Never caches. */
+int  convexQueryOnce(const char *udfPath, const JsonDocument &args, ConvexQueryFn cb);
+int  convexQueryOnce(const char *udfPath, ConvexQueryFn cb);
+
 /* Poll a subscription's latest value from your own loop(). convexQueryChanged
  * returns true once per change (reading clears the flag); convexQueryValue
  * parses the latest cached value into `out` (false if none yet, it did not fit

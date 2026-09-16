@@ -445,7 +445,9 @@ static int subscribeImpl(const char *udfPath, const JsonDocument &args,
   s.queryId = gNextQueryId++;
   snprintf(s.udfPath, sizeof(s.udfPath), "%s", udfPath);
   serializeJson(args, s.args, sizeof(s.args));
-  if (!s.args[0]) strcpy(s.args, "{}");
+  // An empty JsonDocument serializes to "null"; Convex functions take an object,
+  // so an absent/null args becomes "{}" (otherwise the server rejects [null]).
+  if (!s.args[0] || !strcmp(s.args, "null")) strcpy(s.args, "{}");
   s.cb = std::move(cb);
   s.cached = cached;
   s.lastVal = nullptr; s.lastLen = 0; s.changed = false;
@@ -481,6 +483,29 @@ int convexSubscribe(const char *udfPath, const char *argsJson, ConvexQueryFn cb,
   if (argsJson && argsJson[0] && deserializeJson(a, argsJson))
     return fail(CONVEX_ERR_BAD_ARGS, "bad args json");
   return subscribeImpl(udfPath, a, std::move(cb), cache);
+}
+
+int convexQueryOnce(const char *udfPath, const JsonDocument &args, ConvexQueryFn cb) {
+  int qid = subscribeImpl(udfPath, args, ConvexQueryFn(), /*cache=*/false);
+  if (qid < 0) return qid;
+  // Deliver the first result then cancel. handleServerMessage invokes a *copy*
+  // of the stored callback outside the lock, so unsubscribing here (which frees
+  // the stored one) does not destroy the callable mid-call.
+  lock();
+  for (int i = 0; i < MAX_SUBS; ++i)
+    if (gSubs[i].active && gSubs[i].queryId == qid) {
+      gSubs[i].cb = [cb, qid](bool ok, JsonVariantConst v) {
+        if (cb) cb(ok, v);
+        convexUnsubscribe(qid);
+      };
+      break;
+    }
+  unlock();
+  return qid;
+}
+int convexQueryOnce(const char *udfPath, ConvexQueryFn cb) {
+  JsonDocument empty;
+  return convexQueryOnce(udfPath, empty, std::move(cb));
 }
 
 bool convexQueryChanged(int queryId) {
@@ -552,7 +577,7 @@ static int enqueueRequest(const char *udfPath, const JsonDocument &args, bool is
   r.sentMs = millis();
   snprintf(r.udfPath, sizeof(r.udfPath), "%s", udfPath);
   serializeJson(args, r.args, sizeof(r.args));
-  if (!r.args[0]) strcpy(r.args, "{}");
+  if (!r.args[0] || !strcmp(r.args, "null")) strcpy(r.args, "{}");   // [null] -> [{}]
   int rid = r.requestId;
   r.cb = makeCb(rid);
   sendRequest(r);

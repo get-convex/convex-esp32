@@ -141,6 +141,7 @@ See [`examples/ReactiveQuery`](examples/ReactiveQuery) for a complete sketch.
 | `convexOnAuthError(cb, user)` | Fires when the server rejects the token — re-mint and `convexSetAuth()`. |
 | `convexSubscribe(udfPath[, args][, cb[, user]][, cache])` | Reactive query; returns a queryId. Cached by default; optional push callback (lambda or C fn+user); `cache=false` for push-only. |
 | `convexQueryChanged(queryId)` / `convexQueryValue(queryId, out)` | Poll a subscription's latest value. |
+| `convexQueryOnce(udfPath[, args], cb)` | One-shot query: first value, then auto-unsubscribe. |
 | `convexUnsubscribe(queryId)` | Drop a subscription. |
 | `convexMutation/Action(udfPath[, args][, cb])` | Run it. Args as JsonDocument, JSON string, or omitted; C or `std::function` callback. |
 | `convexPause()` / `convexResume()` | Release / re-establish the socket (e.g. to free TLS heap). |
