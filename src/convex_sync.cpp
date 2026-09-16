@@ -699,6 +699,11 @@ static int enqueueRequest(const char *udfPath, const JsonDocument &args, bool is
   int rid = r.requestId;
   r.cb = makeCb(rid);
   sendRequest(r);
+  // Fire-and-forget (no callback): we don't need to hold the slot for the
+  // response, so free it immediately. This is what lets a rapid burst of
+  // no-callback mutations (e.g. a mashed button) never hit "req table full" --
+  // the server still processes and dedups each one by its requestId.
+  if (!r.cb) r.active = false;
   unlock();
   return rid;
 }
