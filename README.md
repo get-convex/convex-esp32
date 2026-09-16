@@ -1,4 +1,4 @@
-# Convex for ESP32 — **alpha**
+# Convex for embedded — ESP32 (**alpha**)
 
 A [Convex](https://convex.dev) client for the ESP32, in C++. It speaks the same
 sync protocol the browser client does, so **queries are reactive**: subscribe
@@ -6,19 +6,23 @@ once and the server pushes a new value whenever the result changes — no pollin
 Mutations and actions ride the same TLS WebSocket, and HTTP actions are one call
 away.
 
+It is **self-contained**: the WebSocket runs over `WiFiClientSecure`, which ships
+with every ESP32 Arduino core, so there is no external component to install and
+it works in both the Arduino IDE and PlatformIO with only ArduinoJson.
+
 > [!WARNING]
 > **This is alpha software with no guarantee of support.** The API may change
 > without notice. It is provided as-is, without warranty (Apache-2.0). Issues
-> and PRs are welcome and handled best-effort. Do not build anything you can't
+> and PRs are welcome and handled best-effort. Don't build anything you can't
 > afford to have break.
 
 ## Why
 
 The usual way to get backend data onto a microcontroller is to poll an HTTP
-endpoint on a timer. That is slow, wasteful of the radio and battery, and always
-a little stale. This library instead holds a Convex sync socket open: your device
-gets pushed the new value the moment a query's result changes, the same way a
-Convex web app does.
+endpoint on a timer: slow, wasteful of the radio and battery, and always a
+little stale. This library instead holds a Convex sync socket open, so your
+device is pushed the new value the moment a query's result changes — the same
+way a Convex web app updates.
 
 ## What works
 
@@ -29,22 +33,24 @@ Convex web app does.
 - **HTTP actions** — `convexHttpAction` for the routes you define with `httpAction`.
 - **Telemetry** — `convexReportEvent` / `convexEnableTelemetry`, using the
   protocol's `Event` message (as the browser client does).
-- TLS via the ESP-IDF **certificate bundle** — validates against real roots, no
-  pinned certs to rotate.
+- TLS via the ESP32 core's built-in **root CA bundle** — real cert validation,
+  nothing to pin or rotate.
 
 ### Not (yet) handled
 
 `TransitionChunk` reassembly (only emitted for very large query results),
-pagination journals, and optimistic updates. Query/request tables are small,
+pagination journals, and optimistic updates. Query/request tables are small and
 fixed-size (12 subscriptions, 8 in-flight requests). PRs welcome.
 
 ## Requirements
 
-- An ESP32 with PSRAM recommended (JSON and the receive buffer prefer it; it
-  falls back to internal RAM).
+- An ESP32 (PSRAM recommended — JSON and the receive buffer prefer it, and fall
+  back to internal RAM).
+- Arduino-ESP32 core **3.2 or newer** (for `WiFiClientSecure::setCACertBundle`).
 - [ArduinoJson](https://arduinojson.org) 7.x.
-- The `esp_websocket_client` ESP-IDF component (for the WebSocket) and
-  `esp_http_client` (in the core, for HTTP actions).
+
+No WebSocket component or extra transport is required — `WiFiClientSecure` and
+`esp_http_client` both come with the core.
 
 ## Install
 
@@ -54,24 +60,18 @@ fixed-size (12 subscriptions, 8 in-flight requests). PRs welcome.
 [env:esp32s3]
 platform  = espressif32
 board     = esp32-s3-devkitc-1
-framework = arduino, espidf          ; the esp-idf combo lets the component load
+framework = arduino
 lib_deps  =
-    https://github.com/get-convex/esp32.git
+    https://github.com/get-convex/convex-esp32.git
     bblanchon/ArduinoJson@^7.0.0
-custom_component_add =
-    espressif/esp_websocket_client@^1.2.0
 build_flags = -DARDUINOJSON_ENABLE_ARDUINO_STRING=1
 ```
 
-`esp_websocket_client` is not part of the Arduino closure, so it is pulled as an
-ESP-IDF managed component — which is why the example uses `framework = arduino,
-espidf`. If you build with a pure `framework = arduino`, add the component some
-other way (e.g. an `idf_component.yml`).
+### Arduino IDE
 
-### ESP-IDF
-
-Add this repo as a component (it ships an `idf_component.yml` that declares
-`esp_websocket_client`), and provide ArduinoJson.
+Install **ArduinoJson** from the Library Manager, then add this library
+(*Sketch → Include Library → Add .ZIP Library*, or clone into your `libraries`
+folder). Open *File → Examples → Convex → ReactiveQuery*.
 
 ## Usage
 
@@ -93,7 +93,7 @@ void setup() {
   convexBegin("https://your-deployment.convex.cloud");   // NOT .site
   // convexSetAuth("<jwt>");                              // optional
 
-  JsonDocument args;                                     // args.["channel"] = "general";
+  JsonDocument args;                                     // args["channel"] = "general";
   convexSubscribe("messages:list", args, onMessages, nullptr);
 }
 
@@ -151,11 +151,17 @@ See [`examples/ReactiveQuery`](examples/ReactiveQuery) for a complete sketch.
 Callbacks fire from the socket's background task — keep them short, copy what you
 keep, and never block.
 
+## TLS
+
+By default the client validates the server against the ESP32 core's embedded
+root CA bundle. To use your own bundle, or (for development only) to disable
+verification, see `cxwsSetCACertBundle` in `src/convex_ws.h`.
+
 ## A note on heap
 
 The socket holds one TLS session open for its lifetime. On parts where only one
 TLS session fits at a time, coordinate with any other HTTPS you do:
-`convexPause()` releases the session for a large upload, and `convexResume()`
+`convexPause()` releases the session for a large upload and `convexResume()`
 reconnects and replays every subscription. A persistent sync socket can often
 *replace* your polling and HTTP calls outright, which is a net win.
 

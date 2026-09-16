@@ -1,6 +1,5 @@
 #include "Convex.h"
-#include <esp_websocket_client.h>
-#include <esp_crt_bundle.h>
+#include "convex_ws.h"
 #include <esp_random.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -39,7 +38,7 @@ struct Req {
   void *user;
 };
 
-static esp_websocket_client_handle_t gClient = nullptr;
+static bool gStarted = false;
 static SemaphoreHandle_t gLock = nullptr;
 static volatile bool gConnected = false;
 static volatile bool gPaused = false;
@@ -98,8 +97,8 @@ int convexSubCount() {
 void convexOnState(ConvexStateCb cb, void *user) { gStateCb = cb; gStateUser = user; }
 
 static void sendText(const char *json, size_t len) {
-  if (!gClient) return;
-  int w = esp_websocket_client_send_text(gClient, json, len, pdMS_TO_TICKS(4000));
+  if (!gStarted) return;
+  int w = cxwsSendText(json, len);
   if (w >= 0) gBytesOut += (uint32_t)len;
   else snprintf(gErr, sizeof(gErr), "send failed %d", w);
 }
@@ -280,36 +279,25 @@ static void appendRx(const char *p, size_t n) {
   memcpy(gRx + gRxLen, p, n); gRxLen += n;
 }
 
-static void wsEvent(void *arg, esp_event_base_t base, int32_t id, void *data) {
-  auto *ev = (esp_websocket_event_data_t *)data;
-  switch (id) {
-    case WEBSOCKET_EVENT_CONNECTED:
-      gRxLen = 0;
-      onConnected();
-      break;
-    case WEBSOCKET_EVENT_DISCONNECTED:
-      gConnected = false;
-      snprintf(gLastCloseReason, sizeof(gLastCloseReason), "disconnected");
-      if (gStateCb) gStateCb(false, gStateUser);
-      break;
-    case WEBSOCKET_EVENT_DATA: {
-      // op_code 0x1 text, 0x2 binary, 0x0 continuation; 0x8 close, 0x9/0xA ping/pong.
-      if (ev->op_code == 0x8 || ev->op_code == 0x9 || ev->op_code == 0xA) break;
-      if (ev->data_len <= 0 || !ev->data_ptr) break;
-      gBytesIn += (uint32_t)ev->data_len;
-      // A message may span several DATA events; payload_offset/payload_len frame it.
-      if (ev->payload_offset == 0) gRxLen = 0;
-      appendRx(ev->data_ptr, ev->data_len);
-      if ((int)(ev->payload_offset + ev->data_len) >= ev->payload_len && gRxLen > 0) {
-        handleServerMessage(gRx, gRxLen);
-        gRxLen = 0;
-      }
-      break;
-    }
-    case WEBSOCKET_EVENT_ERROR:
-      snprintf(gErr, sizeof(gErr), "ws error");
-      break;
-    default: break;
+static void onWsState(bool up) {
+  if (up) { gRxLen = 0; onConnected(); }
+  else {
+    gConnected = false;
+    snprintf(gLastCloseReason, sizeof(gLastCloseReason), "disconnected");
+    if (gStateCb) gStateCb(false, gStateUser);
+  }
+}
+
+static void onWsData(uint8_t opcode, const char *data, int len, int offset, int total) {
+  // opcode 0x1 text, 0x2 binary, 0x0 continuation (ping/pong/close never reach here).
+  if (len <= 0 || !data) return;
+  gBytesIn += (uint32_t)len;
+  // A message may span several callbacks; offset/total frame it.
+  if (offset == 0) gRxLen = 0;
+  appendRx(data, len);
+  if (offset + len >= total && gRxLen > 0) {
+    handleServerMessage(gRx, gRxLen);
+    gRxLen = 0;
   }
 }
 
@@ -326,7 +314,7 @@ static void makeSessionId() {
 }
 
 bool convexBegin(const char *cloudUrl) {
-  if (gClient) return true;
+  if (gStarted) return true;
   if (!gLock) gLock = xSemaphoreCreateMutex();
   gConnectStartMs = millis();
   makeSessionId();
@@ -344,32 +332,18 @@ bool convexBegin(const char *cloudUrl) {
   if (dotCloud) { memcpy(dotCloud, ".convex.site", 12); dotCloud[12] = 0; }
   convexSetHttpBase(site);
 
-  esp_websocket_client_config_t cfg = {};
-  cfg.uri = uri;
-  cfg.crt_bundle_attach = esp_crt_bundle_attach;   // TLS via the IDF cert bundle
-  cfg.buffer_size = 4096;
-  cfg.task_stack = 6144;
-  cfg.task_prio = 5;
-  cfg.reconnect_timeout_ms = 5000;
-  cfg.network_timeout_ms = 10000;
-  cfg.ping_interval_sec = 30;
-  cfg.disable_auto_reconnect = false;
-
-  gClient = esp_websocket_client_init(&cfg);
-  if (!gClient) { snprintf(gErr, sizeof(gErr), "ws init failed"); return false; }
-  esp_websocket_register_events(gClient, WEBSOCKET_EVENT_ANY, wsEvent, nullptr);
-  if (esp_websocket_client_start(gClient) != ESP_OK) {
+  if (!cxwsBegin(uri, onWsData, onWsState, /*rxChunk=*/4096)) {
     snprintf(gErr, sizeof(gErr), "ws start failed");
-    esp_websocket_client_destroy(gClient); gClient = nullptr; return false;
+    return false;
   }
+  gStarted = true;
   return true;
 }
 
 void convexEnd() {
-  if (!gClient) return;
-  esp_websocket_client_stop(gClient);
-  esp_websocket_client_destroy(gClient);
-  gClient = nullptr;
+  if (!gStarted) return;
+  cxwsEnd();
+  gStarted = false;
   gConnected = false;
 }
 
@@ -441,17 +415,17 @@ int convexAction(const char *udfPath, const JsonDocument &args, ConvexResultCb c
 }
 
 void convexPause() {
-  if (!gClient || gPaused) return;
+  if (!gStarted || gPaused) return;
   gPaused = true;
-  esp_websocket_client_stop(gClient);   // releases the TLS session
+  cxwsPause();              // releases the TLS session
   gConnected = false;
 }
 
 void convexResume() {
-  if (!gClient || !gPaused) return;
+  if (!gStarted || !gPaused) return;
   gPaused = false;
   gConnectStartMs = millis();
-  esp_websocket_client_start(gClient);  // reconnect -> onConnected replays subs
+  cxwsResume();            // reconnect -> onConnected replays subs
 }
 
 void convexEnableTelemetry(bool on) { gTelemetry = on; }
