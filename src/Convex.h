@@ -30,6 +30,25 @@
  * committed support (Apache-2.0). Issues and PRs welcome, best-effort.
  */
 
+// ---- status ---------------------------------------------------------------
+
+/* Negative results returned by the calls below are one of these, so a return
+ * value is self-describing without reading the (shared, human-readable)
+ * convexLastError() string. Handles (queryId/requestId) and HTTP status codes
+ * are >= 0. */
+enum ConvexStatus {
+  CONVEX_OK            =  0,
+  CONVEX_ERR_OFFLINE   = -1,   // not connected
+  CONVEX_ERR_TABLE_FULL= -2,   // subscription / request table is full
+  CONVEX_ERR_LOW_HEAP  = -3,   // refused to open TLS below CONVEX_MIN_HEAP
+  CONVEX_ERR_BAD_ARGS  = -4,   // args JSON did not parse
+  CONVEX_ERR_NO_BASE   = -5,   // relative HTTP path but no deployment base set
+  CONVEX_ERR_TRANSPORT = -6,   // TLS/HTTP transport failure
+};
+/* The status of the most recent failed call, and a human-readable detail. */
+ConvexStatus convexLastStatus();
+const char  *convexStatusStr(ConvexStatus s);
+
 // ---- reactive sync (WebSocket) --------------------------------------------
 
 /* A reactive query result. `value` is the current query value straight off the
@@ -42,6 +61,11 @@ typedef void (*ConvexResultCb)(int requestId, bool ok, JsonVariantConst result, 
 
 /* Notified on every connect/disconnect edge. */
 typedef void (*ConvexStateCb)(bool connected, void *user);
+
+/* Notified when the server rejects the auth token (AuthError). The handler
+ * should mint a fresh token and call convexSetAuth() with it. `error` is the
+ * server's message, valid only during the callback. */
+typedef void (*ConvexAuthCb)(const char *error, void *user);
 
 /* Lambda-friendly callback forms (can capture). A small heap cost per use. */
 typedef std::function<void(bool ok, JsonVariantConst value)> ConvexQueryFn;
@@ -61,6 +85,10 @@ void convexSetAuth(const char *token);
 /* One state handler; nullptr clears. */
 void convexOnState(ConvexStateCb cb, void *user);
 
+/* One auth-error handler; nullptr clears. Fires when the server rejects the
+ * token so you can refresh it and call convexSetAuth() again. */
+void convexOnAuthError(ConvexAuthCb cb, void *user);
+
 /* Subscribe to a reactive query. `udfPath` is "file:function"; `args` is the
  * single Convex args object (may be empty). Returns a queryId (>=0), or -1 if
  * the subscription table is full. Args are copied.
@@ -75,6 +103,9 @@ int  convexSubscribe(const char *udfPath, const JsonDocument &args,
 int  convexSubscribe(const char *udfPath, const JsonDocument &args,
                      ConvexQueryCb cb, void *user, bool cache = true);
 int  convexSubscribe(const char *udfPath);   // no args, cached, no callback
+/* Args as a JSON string, e.g. convexSubscribe("q:list", "{\"room\":\"a\"}"). */
+int  convexSubscribe(const char *udfPath, const char *argsJson,
+                     ConvexQueryFn cb = ConvexQueryFn(), bool cache = true);
 void convexUnsubscribe(int queryId);
 
 /* Poll a subscription's latest value from your own loop(). convexQueryChanged
@@ -85,13 +116,22 @@ bool convexQueryChanged(int queryId);
 bool convexQueryValue(int queryId, JsonDocument &out);
 
 /* Run a mutation or action over the socket. `cb` (may be null) fires once with
- * the result. Returns a requestId (>=0) or -1 if offline / table full. */
+ * the result. Returns a requestId (>=0) or a negative ConvexStatus.
+ *
+ * Args may be a JsonDocument, a JSON string, or omitted:
+ *   convexMutation("counter:inc");                       // no args
+ *   convexMutation("counter:inc", "{\"by\":1}");         // JSON string
+ *   convexMutation("counter:inc", doc, onDone);          // JsonDocument */
 int  convexMutation(const char *udfPath, const JsonDocument &args,
                     ConvexResultCb cb, void *user);
 int  convexAction(const char *udfPath, const JsonDocument &args,
                   ConvexResultCb cb, void *user);
 int  convexMutation(const char *udfPath, const JsonDocument &args, ConvexResultFn cb);
 int  convexAction(const char *udfPath, const JsonDocument &args, ConvexResultFn cb);
+int  convexMutation(const char *udfPath, const char *argsJson = nullptr,
+                    ConvexResultFn cb = ConvexResultFn());
+int  convexAction(const char *udfPath, const char *argsJson = nullptr,
+                  ConvexResultFn cb = ConvexResultFn());
 
 /* Release the socket's TLS session (e.g. to free heap for an HTTP upload) and
  * later reconnect, replaying every subscription and the auth token. */

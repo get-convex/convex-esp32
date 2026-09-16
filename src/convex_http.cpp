@@ -11,6 +11,8 @@
 
 static char gSite[160] = "";   // https://<dep>.convex.site, set by convexBegin
 
+void convexSetStatus_(ConvexStatus s);   // internal, defined in convex_sync.cpp
+
 void convexSetHttpBase(const char *siteUrl) {
   snprintf(gSite, sizeof(gSite), "%s", siteUrl ? siteUrl : "");
 }
@@ -53,7 +55,8 @@ static int httpActionRaw(const char *method, const char *pathOrUrl, const char *
   } else if (gSite[0]) {
     snprintf(url, sizeof(url), "%s%s%s", gSite, pathOrUrl[0] == '/' ? "" : "/", pathOrUrl);
   } else {
-    return -1;   // no base and not absolute: caller must convexBegin() or pass a URL
+    convexSetStatus_(CONVEX_ERR_NO_BASE);   // caller must convexBegin() or pass a URL
+    return CONVEX_ERR_NO_BASE;
   }
 
   esp_http_client_config_t cfg = {};
@@ -62,7 +65,7 @@ static int httpActionRaw(const char *method, const char *pathOrUrl, const char *
   cfg.timeout_ms = 20000;
   cfg.method = methodOf(method);
   esp_http_client_handle_t c = esp_http_client_init(&cfg);
-  if (!c) return -2;
+  if (!c) { convexSetStatus_(CONVEX_ERR_TRANSPORT); return CONVEX_ERR_TRANSPORT; }
 
   if (body) esp_http_client_set_header(c, "Content-Type", contentType ? contentType : "application/json");
   if (token) {
@@ -73,10 +76,10 @@ static int httpActionRaw(const char *method, const char *pathOrUrl, const char *
 
   size_t bodyLen = body ? strlen(body) : 0;
   esp_err_t err = esp_http_client_open(c, bodyLen);
-  if (err != ESP_OK) { esp_http_client_cleanup(c); return -3; }
+  if (err != ESP_OK) { esp_http_client_cleanup(c); convexSetStatus_(CONVEX_ERR_TRANSPORT); return CONVEX_ERR_TRANSPORT; }
   if (bodyLen) {
     int w = esp_http_client_write(c, body, bodyLen);
-    if (w < 0) { esp_http_client_close(c); esp_http_client_cleanup(c); return -4; }
+    if (w < 0) { esp_http_client_close(c); esp_http_client_cleanup(c); convexSetStatus_(CONVEX_ERR_TRANSPORT); return CONVEX_ERR_TRANSPORT; }
   }
   esp_http_client_fetch_headers(c);
   int status = esp_http_client_get_status_code(c);

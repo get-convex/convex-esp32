@@ -61,9 +61,32 @@ static char gToken[800] = "";
 static char gMaxObservedTs[24] = "";   // opaque base64, echoed on reconnect
 
 static char gErr[96] = "";
+static ConvexStatus gStatus = CONVEX_OK;
 static uint32_t gBytesIn = 0, gBytesOut = 0;
 static ConvexStateCb gStateCb = nullptr;
 static void *gStateUser = nullptr;
+static ConvexAuthCb gAuthCb = nullptr;
+static void *gAuthUser = nullptr;
+
+// Record a failure: sets both the machine-readable status and the human string.
+static ConvexStatus fail(ConvexStatus s, const char *msg) {
+  gStatus = s; if (msg) snprintf(gErr, sizeof(gErr), "%s", msg); return s;
+}
+void convexSetStatus_(ConvexStatus s) { gStatus = s; }   // internal, for convex_http.cpp
+ConvexStatus convexLastStatus() { return gStatus; }
+const char *convexStatusStr(ConvexStatus s) {
+  switch (s) {
+    case CONVEX_OK:             return "ok";
+    case CONVEX_ERR_OFFLINE:    return "offline";
+    case CONVEX_ERR_TABLE_FULL: return "table full";
+    case CONVEX_ERR_LOW_HEAP:   return "low heap";
+    case CONVEX_ERR_BAD_ARGS:   return "bad args json";
+    case CONVEX_ERR_NO_BASE:    return "no deployment base";
+    case CONVEX_ERR_TRANSPORT:  return "transport error";
+  }
+  return "?";
+}
+void convexOnAuthError(ConvexAuthCb cb, void *user) { gAuthCb = cb; gAuthUser = user; }
 static bool gTelemetry = false;
 static uint32_t gConnectStartMs = 0;
 
@@ -266,7 +289,12 @@ static void handleServerMessage(const char *json, size_t len) {
     return;
   }
 
-  if (!strcmp(type, "AuthError")) { snprintf(gErr, sizeof(gErr), "auth: %s", d["error"] | "?"); return; }
+  if (!strcmp(type, "AuthError")) {
+    const char *err = d["error"] | "?";
+    snprintf(gErr, sizeof(gErr), "auth: %s", err);
+    if (gAuthCb) gAuthCb(err, gAuthUser);   // app should re-mint and convexSetAuth()
+    return;
+  }
   if (!strcmp(type, "FatalError")) {
     // The server is rejecting this connection; don't reconnect-storm it.
     snprintf(gErr, sizeof(gErr), "fatal: %s", d["error"] | "?");
@@ -354,7 +382,8 @@ bool convexBegin(const char *cloudUrl) {
   sampleHeap();
   uint32_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
   if (freeHeap < (uint32_t)CONVEX_MIN_HEAP) {
-    snprintf(gErr, sizeof(gErr), "low heap %u < %u; not opening TLS", freeHeap, (unsigned)CONVEX_MIN_HEAP);
+    char m[64]; snprintf(m, sizeof(m), "low heap %u < %u; not opening TLS", freeHeap, (unsigned)CONVEX_MIN_HEAP);
+    fail(CONVEX_ERR_LOW_HEAP, m);
     return false;
   }
   gConnectStartMs = millis();
@@ -410,7 +439,7 @@ static int subscribeImpl(const char *udfPath, const JsonDocument &args,
   lock();
   int slot = -1;
   for (int i = 0; i < MAX_SUBS; ++i) if (!gSubs[i].active) { slot = i; break; }
-  if (slot < 0) { unlock(); snprintf(gErr, sizeof(gErr), "sub table full"); return -1; }
+  if (slot < 0) { unlock(); return fail(CONVEX_ERR_TABLE_FULL, "sub table full"); }
   Sub &s = gSubs[slot];
   s.active = true;
   s.queryId = gNextQueryId++;
@@ -446,6 +475,12 @@ int convexSubscribe(const char *udfPath, const JsonDocument &args,
 int convexSubscribe(const char *udfPath) {
   JsonDocument empty;
   return subscribeImpl(udfPath, empty, ConvexQueryFn(), /*cache=*/true);
+}
+int convexSubscribe(const char *udfPath, const char *argsJson, ConvexQueryFn cb, bool cache) {
+  JsonDocument a;
+  if (argsJson && argsJson[0] && deserializeJson(a, argsJson))
+    return fail(CONVEX_ERR_BAD_ARGS, "bad args json");
+  return subscribeImpl(udfPath, a, std::move(cb), cache);
 }
 
 bool convexQueryChanged(int queryId) {
@@ -506,10 +541,10 @@ static int enqueueRequest(const char *udfPath, const JsonDocument &args, bool is
                           const std::function<ConvexResultFn(int rid)> &makeCb) {
   expireRequests();
   lock();
-  if (!gConnected) { unlock(); snprintf(gErr, sizeof(gErr), "offline"); return -1; }
+  if (!gConnected) { unlock(); return fail(CONVEX_ERR_OFFLINE, "offline"); }
   int slot = -1;
   for (int i = 0; i < MAX_REQS; ++i) if (!gReqs[i].active) { slot = i; break; }
-  if (slot < 0) { unlock(); snprintf(gErr, sizeof(gErr), "req table full"); return -1; }
+  if (slot < 0) { unlock(); return fail(CONVEX_ERR_TABLE_FULL, "req table full"); }
   Req &r = gReqs[slot];
   r.active = true;
   r.requestId = gNextRequestId++;
@@ -546,6 +581,18 @@ int convexMutation(const char *udfPath, const JsonDocument &args, ConvexResultFn
 }
 int convexAction(const char *udfPath, const JsonDocument &args, ConvexResultFn cb) {
   return enqueueRequest(udfPath, args, true, fnResult(std::move(cb)));
+}
+static int requestJson(const char *udfPath, const char *argsJson, bool isAction, ConvexResultFn cb) {
+  JsonDocument a;
+  if (argsJson && argsJson[0] && deserializeJson(a, argsJson))
+    return fail(CONVEX_ERR_BAD_ARGS, "bad args json");
+  return enqueueRequest(udfPath, a, isAction, fnResult(std::move(cb)));
+}
+int convexMutation(const char *udfPath, const char *argsJson, ConvexResultFn cb) {
+  return requestJson(udfPath, argsJson, false, std::move(cb));
+}
+int convexAction(const char *udfPath, const char *argsJson, ConvexResultFn cb) {
+  return requestJson(udfPath, argsJson, true, std::move(cb));
 }
 
 void convexPause() {

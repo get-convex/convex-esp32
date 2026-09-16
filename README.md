@@ -138,15 +138,17 @@ See [`examples/ReactiveQuery`](examples/ReactiveQuery) for a complete sketch.
 | `convexConnected()` | Is the socket up. |
 | `convexSetAuth(token)` | Set/clear the `User` auth token. |
 | `convexOnState(cb, user)` | Connect/disconnect callback. |
+| `convexOnAuthError(cb, user)` | Fires when the server rejects the token — re-mint and `convexSetAuth()`. |
 | `convexSubscribe(udfPath[, args][, cb[, user]][, cache])` | Reactive query; returns a queryId. Cached by default; optional push callback (lambda or C fn+user); `cache=false` for push-only. |
 | `convexQueryChanged(queryId)` / `convexQueryValue(queryId, out)` | Poll a subscription's latest value. |
 | `convexUnsubscribe(queryId)` | Drop a subscription. |
-| `convexMutation/Action(udfPath, args, cb[, user])` | Run it; C or `std::function` callback. |
+| `convexMutation/Action(udfPath[, args][, cb])` | Run it. Args as JsonDocument, JSON string, or omitted; C or `std::function` callback. |
 | `convexPause()` / `convexResume()` | Release / re-establish the socket (e.g. to free TLS heap). |
 | `convexHttpAction(method, pathOrUrl, body, token, resp, cap[, contentType, keepSocket])` | Call an `httpAction` route. |
 | `convexReportEvent(eventType, event)` | Send a telemetry `Event`. |
 | `convexEnableTelemetry(on)` | Auto-emit `ClientConnect` on connect. |
-| `convexLastError()`, `convexSubCount()`, `convexBytesIn/Out()`, `convexHeapLowWater()` | Diagnostics. |
+| `convexLastStatus()` / `convexStatusStr(s)` / `convexLastError()` | Machine + human error of the last failed call (negative returns are a `ConvexStatus`). |
+| `convexSubCount()`, `convexBytesIn/Out()`, `convexHeapLowWater()` | Diagnostics. |
 
 ### Reading a query: poll, callback, or both
 
