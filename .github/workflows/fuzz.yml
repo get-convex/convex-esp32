@@ -1,0 +1,20 @@
+name: fuzz
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Fuzz the JSON handler and the WebSocket frame parser (ASan+UBSan)
+        run: make -C test/fuzz run FUZZ_N=200000
+        env:
+          CXX: clang++
+          ASAN_OPTIONS: abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1

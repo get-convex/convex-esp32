@@ -227,10 +227,11 @@ CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=2048
   connection instead of growing the heap; the send queue is capped; a request
   whose reply never arrives is failed after `CONVEX_REQ_TIMEOUT_MS` so the table
   can't fill; malformed JSON and frames are rejected, never trusted.
-- **Fuzzed.** The JSON message handler and the WebSocket frame parser have each
-  been run through 500k iterations of mutated and random input under
-  AddressSanitizer + UndefinedBehaviorSanitizer with no crash, memory error, or
-  UB. Still alpha — this is not a security audit.
+- **Fuzzed in CI.** The JSON message handler and the WebSocket frame parser are
+  each run through hundreds of thousands of iterations of mutated and random
+  input under AddressSanitizer + UndefinedBehaviorSanitizer on every push (see
+  [`test/fuzz`](test/fuzz) and `.github/workflows/fuzz.yml`) — a crash, memory
+  error, or UB fails the build. Still alpha — this is not a security audit.
 
 ## TLS
 
