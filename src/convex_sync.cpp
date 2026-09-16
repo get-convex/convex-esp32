@@ -35,6 +35,7 @@ struct Req {
   bool active;
   int  requestId;
   bool isAction;           // false = mutation
+  uint32_t sentMs;         // for timing out a reply that never arrives
   char udfPath[CONVEX_UDF_BUF];
   char args[CONVEX_ARGS_BUF];
   ConvexResultFn cb;
@@ -241,6 +242,7 @@ static void handleServerMessage(const char *json, size_t len) {
       for (int i = 0; i < MAX_SUBS; ++i)
         if (gSubs[i].active && gSubs[i].queryId == qid) {
           if (gSubs[i].cached && updated) cacheValue(gSubs[i], mod["value"]);
+          else if (gSubs[i].cached && failed) gSubs[i].changed = true;  // poller re-checks
           cb = gSubs[i].cb;   // copy; may be empty (cached-only subscription)
           break;
         }
@@ -475,11 +477,28 @@ void convexUnsubscribe(int queryId) {
   unlock();
 }
 
+// Fail and free any request whose reply never arrived, so a lost response can't
+// permanently fill the table. Callbacks fire outside the lock.
+static void expireRequests() {
+  ConvexResultFn fire[MAX_REQS]; int nf = 0;
+  lock();
+  uint32_t now = millis();
+  for (int i = 0; i < MAX_REQS; ++i)
+    if (gReqs[i].active && (uint32_t)(now - gReqs[i].sentMs) > (uint32_t)CONVEX_REQ_TIMEOUT_MS) {
+      fire[nf++] = std::move(gReqs[i].cb);
+      gReqs[i].active = false; gReqs[i].cb = ConvexResultFn();
+      snprintf(gErr, sizeof(gErr), "request timed out");
+    }
+  unlock();
+  for (int i = 0; i < nf; ++i) if (fire[i]) fire[i](false, JsonVariantConst());
+}
+
 // `makeCb(rid)` builds the result callback once the requestId is assigned, so a
 // raw ConvexResultCb sees the real id and the cb is in place before we send
 // (no chance the response beats it).
 static int enqueueRequest(const char *udfPath, const JsonDocument &args, bool isAction,
                           const std::function<ConvexResultFn(int rid)> &makeCb) {
+  expireRequests();
   lock();
   if (!gConnected) { unlock(); snprintf(gErr, sizeof(gErr), "offline"); return -1; }
   int slot = -1;
@@ -489,6 +508,7 @@ static int enqueueRequest(const char *udfPath, const JsonDocument &args, bool is
   r.active = true;
   r.requestId = gNextRequestId++;
   r.isAction = isAction;
+  r.sentMs = millis();
   snprintf(r.udfPath, sizeof(r.udfPath), "%s", udfPath);
   serializeJson(args, r.args, sizeof(r.args));
   if (!r.args[0]) strcpy(r.args, "{}");

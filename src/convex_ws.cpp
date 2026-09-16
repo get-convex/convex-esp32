@@ -162,6 +162,10 @@ static void serviceLoop() {
       int r = gTls.read(buf, sizeof(buf));
       if (r > 0) { in.append((char *)buf, r); did = true; }
       parseFrames(in, msgOp, msg);
+      // A frame whose declared length never completes must not grow the backlog
+      // without bound. If it exceeds what we would ever accept, drop the
+      // connection (the reconnect replays every subscription cleanly).
+      if (in.size() > (size_t)CONVEX_RX_MAX + 4096) { gConnected = false; break; }
     }
     std::string f;
     for (;;) {

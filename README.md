@@ -202,6 +202,22 @@ CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=2048
 ```
 
+## Robustness
+
+- **Reconnects** automatically and, on each reconnect, re-sends `Connect` (with
+  the last observed timestamp), re-authenticates, re-declares the whole query
+  set, and replays in-flight requests. The stable `sessionId` + replayed
+  `requestId` let the server dedup a mutation interrupted by a drop, so it is
+  not applied twice.
+- **Bounded against a hostile/broken server:** an oversized message drops the
+  connection instead of growing the heap; the send queue is capped; a request
+  whose reply never arrives is failed after `CONVEX_REQ_TIMEOUT_MS` so the table
+  can't fill; malformed JSON and frames are rejected, never trusted.
+- **Fuzzed.** The JSON message handler and the WebSocket frame parser have each
+  been run through 500k iterations of mutated and random input under
+  AddressSanitizer + UndefinedBehaviorSanitizer with no crash, memory error, or
+  UB. Still alpha — this is not a security audit.
+
 ## TLS
 
 By default the client validates the server against the ESP32 core's embedded

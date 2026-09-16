@@ -41,3 +41,9 @@
 #ifndef CONVEX_SEND_QUEUE_MAX
 #define CONVEX_SEND_QUEUE_MAX 16
 #endif
+
+// A mutation/action whose response never arrives is failed and its slot freed
+// after this many ms, so a lost reply cannot permanently fill the request table.
+#ifndef CONVEX_REQ_TIMEOUT_MS
+#define CONVEX_REQ_TIMEOUT_MS 30000
+#endif
