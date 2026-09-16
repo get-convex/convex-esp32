@@ -10,6 +10,12 @@ It is **self-contained**: the WebSocket runs over `WiFiClientSecure`, which ship
 with every ESP32 Arduino core, so there is no external component to install and
 it works in both the Arduino IDE and PlatformIO with only ArduinoJson.
 
+<p align="center">
+  <img src="examples/counter/media/web.jpg" width="360" alt="A web page and an ESP32 sharing one live Convex counter">
+  <br>
+  <em>A <a href="examples/counter">shared counter</a>: tap the ESP32's touchscreen or this web page and the number updates on both, instantly.</em>
+</p>
+
 > [!WARNING]
 > **This is alpha software with no guarantee of support.** The API may change
 > without notice. It is provided as-is, without warranty (Apache-2.0). Issues
