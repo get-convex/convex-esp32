@@ -27,7 +27,8 @@ void cxwsEnd();
 bool cxwsConnected();
 int  cxwsSendText(const char *data, size_t len);   // queued; returns len or -1
 void cxwsPause();    // disconnect and stop reconnecting (frees the TLS session)
-void cxwsResume();   // reconnect
+void cxwsResume();   // reconnect (resets the backoff)
+void cxwsPenalize(); // force the next reconnect to the maximum backoff (e.g. on a FatalError)
 
 // Optional: supply a CA bundle for TLS verification (DER x509 bundle, as the
 // ESP32 core embeds). If never called, the transport verifies against the core's

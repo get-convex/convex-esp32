@@ -31,6 +31,20 @@ static const uint8_t *gBundle = nullptr;
 static size_t gBundleSize = 0;
 static bool gBundleSet = false;
 
+static uint32_t gBackoffMs = CONVEX_RECONNECT_BASE_MS;
+static volatile bool gPenalized = false;   // set by cxwsPenalize() on a FatalError
+
+// A jittered wait derived from the current backoff (full jitter: 0..backoff).
+static uint32_t nextBackoff() {
+  uint32_t base = gBackoffMs;
+  gBackoffMs = base * 2;
+  if (gBackoffMs > (uint32_t)CONVEX_RECONNECT_MAX_MS) gBackoffMs = CONVEX_RECONNECT_MAX_MS;
+  uint32_t jitter = base ? (esp_random() % base) : 0;
+  return (base / 2) + jitter;   // 50%..150% of base, capped growth
+}
+
+void cxwsPenalize() { gPenalized = true; }
+
 void cxwsSetCACertBundle(const uint8_t *bundle, size_t size) {
   gBundle = bundle; gBundleSize = size; gBundleSet = true;
 }
@@ -184,7 +198,10 @@ static void runTask(void *) {
   for (;;) {
     if (!gRunning) break;
     if (gPaused) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
+
+    uint32_t connectedAt = 0;
     if (connectOnce()) {
+      connectedAt = millis();
       gConnected = true;
       if (gOnState) gOnState(true);
       serviceLoop();
@@ -193,7 +210,16 @@ static void runTask(void *) {
     }
     gTls.stop();
     { xSemaphoreTake(gSendMx, portMAX_DELAY); gSendQ.clear(); xSemaphoreGive(gSendMx); }
-    for (int s = 0; gRunning && !gPaused && s < 5000; s += 100) vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Reset the backoff only after a connection that actually held up, so a
+    // connect-then-instantly-drop loop still backs off. A FatalError penalty
+    // forces the maximum wait regardless.
+    uint32_t uptime = connectedAt ? (millis() - connectedAt) : 0;
+    if (gPenalized) { gBackoffMs = CONVEX_RECONNECT_MAX_MS; gPenalized = false; }
+    else if (uptime >= (uint32_t)CONVEX_RECONNECT_STABLE_MS) gBackoffMs = CONVEX_RECONNECT_BASE_MS;
+
+    uint32_t wait = nextBackoff();
+    for (uint32_t s = 0; gRunning && !gPaused && s < wait; s += 100) vTaskDelay(pdMS_TO_TICKS(100));
   }
   gTask = nullptr;
   vTaskDelete(nullptr);
@@ -219,6 +245,7 @@ bool cxwsBegin(const char *wssUri, CxWsOnData onData, CxWsOnState onState, int r
   parseUri(wssUri);
   gOnData = onData; gOnState = onState; gRxChunk = rxChunk;
   gRunning = true; gPaused = false;
+  gBackoffMs = CONVEX_RECONNECT_BASE_MS; gPenalized = false;
   return xTaskCreatePinnedToCore(runTask, "convex_ws", 8192, nullptr, 5, &gTask, 0) == pdPASS;
 }
 
@@ -229,4 +256,4 @@ void cxwsEnd() {
 }
 
 void cxwsPause()  { gPaused = true; gConnected = false; gTls.stop(); }
-void cxwsResume() { gPaused = false; }
+void cxwsResume() { gBackoffMs = CONVEX_RECONNECT_BASE_MS; gPenalized = false; gPaused = false; }

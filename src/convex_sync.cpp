@@ -267,7 +267,12 @@ static void handleServerMessage(const char *json, size_t len) {
   }
 
   if (!strcmp(type, "AuthError")) { snprintf(gErr, sizeof(gErr), "auth: %s", d["error"] | "?"); return; }
-  if (!strcmp(type, "FatalError")) { snprintf(gErr, sizeof(gErr), "fatal: %s", d["error"] | "?"); return; }
+  if (!strcmp(type, "FatalError")) {
+    // The server is rejecting this connection; don't reconnect-storm it.
+    snprintf(gErr, sizeof(gErr), "fatal: %s", d["error"] | "?");
+    cxwsPenalize();
+    return;
+  }
   // Ping needs no reply; chunked transitions are only emitted for very large
   // results, which a device is unlikely to subscribe to.
   if (!strcmp(type, "TransitionChunk")) snprintf(gErr, sizeof(gErr), "unhandled TransitionChunk");

@@ -47,3 +47,17 @@
 #ifndef CONVEX_REQ_TIMEOUT_MS
 #define CONVEX_REQ_TIMEOUT_MS 30000
 #endif
+
+// Reconnect backoff: exponential from BASE to MAX with jitter, so a persistent
+// failure (or a whole fleet failing at once) does not hammer the deployment.
+// The backoff resets to BASE only after a connection has stayed up for STABLE
+// ms, so a connect-then-immediately-drop loop still backs off.
+#ifndef CONVEX_RECONNECT_BASE_MS
+#define CONVEX_RECONNECT_BASE_MS 1000
+#endif
+#ifndef CONVEX_RECONNECT_MAX_MS
+#define CONVEX_RECONNECT_MAX_MS 60000
+#endif
+#ifndef CONVEX_RECONNECT_STABLE_MS
+#define CONVEX_RECONNECT_STABLE_MS 30000
+#endif
