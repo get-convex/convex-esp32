@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Convex ⚡ ESP32 demo</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+         font: 16px/1.4 system-ui, sans-serif; color: #e7e9ee;
+         background: radial-gradient(120% 120% at 50% 0%, #1b1340 0%, #0b0a14 60%); }
+  .card { width: min(92vw, 460px); background: #141322; border: 1px solid #2a2740;
+          border-radius: 20px; padding: 28px; box-shadow: 0 20px 60px #0008; text-align: center; }
+  h1 { margin: 0 0 2px; font-size: 20px; }
+  .sub { color: #8b8ba7; font-size: 13px; margin-bottom: 22px; }
+  .count { font-size: 120px; font-weight: 800; line-height: 1; margin: 6px 0;
+           background: linear-gradient(180deg,#c9b8ff,#7c5cff); -webkit-background-clip: text;
+           background-clip: text; color: transparent; }
+  .last { color: #9a9ac0; margin-bottom: 24px; font-size: 15px; }
+  .last b { color: #e7e9ee; }
+  button { width: 100%; padding: 20px; font-size: 22px; font-weight: 800; cursor: pointer;
+           color: #fff; background: linear-gradient(180deg,#7c5cff,#5b3ce0); border: 0;
+           border-radius: 16px; transition: transform .05s; }
+  button:active { transform: scale(.97); }
+  button:disabled { opacity: .5; cursor: default; }
+  .status { margin-top: 16px; font-size: 13px; color: #8b8ba7; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: #d33; }
+  .dot.ok { background: #2ec77a; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Convex ⚡ ESP32</h1>
+    <div class="sub">A shared counter in Convex. This page uses the official <code>convex</code> client; the device uses <code>convex-esp32</code>. Tap here or on the ESP32 — both update instantly.</div>
+    <div class="count" id="count">–</div>
+    <div class="last">last tap: <b id="last">—</b></div>
+    <button id="tap" disabled>👋 Tap  (+1)</button>
+    <div class="status"><span class="dot" id="dot"></span><span id="statusText">loading convex client…</span></div>
+  </div>
+<script type="module">
+import { ConvexClient } from "https://esm.sh/convex@1.45.0/browser";
+
+const DEPLOYMENT = "https://YOUR-DEPLOYMENT.convex.cloud";   // your cxdemo-backend deployment
+const $ = id => document.getElementById(id);
+const setStatus = (ok, t) => { $("dot").className = "dot" + (ok ? " ok" : ""); $("statusText").textContent = t; };
+
+const client = new ConvexClient(DEPLOYMENT);
+
+// Reactive subscription: the server pushes a new value on every tap (from any
+// client) — no polling.
+client.onUpdate("demo:get", {}, (s) => {
+  $("count").textContent = s.count;
+  $("last").textContent = s.lastActor;
+  setStatus(true, "connected — live");
+  $("tap").disabled = false;
+});
+
+$("tap").onclick = () => client.mutation("demo:tap", { who: "web" });
+
+setStatus(false, "connecting…");
+</script>
+</body>
+</html>

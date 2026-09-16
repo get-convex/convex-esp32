@@ -1,0 +1,9 @@
+{
+  "name": "cxdemo-backend",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Tiny Convex deployment for the ESP32 + web demo (shared counter).",
+  "dependencies": {
+    "convex": "^1.24.0"
+  }
+}

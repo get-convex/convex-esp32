@@ -131,7 +131,10 @@ JsonDocument ev; ev["battery"] = 84; ev["fw"] = "1.4.0";
 convexReportEvent("DeviceHealth", ev);
 ```
 
-See [`examples/ReactiveQuery`](examples/ReactiveQuery) for a complete sketch.
+See [`examples/ReactiveQuery`](examples/ReactiveQuery) for a minimal sketch, and
+[`examples/counter`](examples/counter) for a full end-to-end demo — an ESP32 and
+a web page sharing one live counter through a tiny Convex deployment (with a
+screenshot).
 
 ## API
 
